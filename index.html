@@ -87,6 +87,10 @@ input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:
     <select id="grid"><option value="1">1/4拍</option><option value="2" selected>1/8拍</option><option value="4">1/16拍</option></select>
     <button id="quant" disabled style="flex:2">拍に揃える</button>
   </div>
+  <div class="row" style="margin-top:8px;align-items:center">
+    <label style="margin:0">最短休符 <select id="minrest"><option value="8">32分</option><option value="4" selected>16分</option><option value="2">8分</option><option value="1">4分</option></select></label>
+    <button id="rebuild" disabled style="flex:2">録音から作り直す</button>
+  </div>
   <div class="row" style="margin-top:4px"><label style="margin:8px 0 0"><input type="checkbox" id="metro"> 録音中メトロノーム</label><label style="margin:8px 0 0"><input type="checkbox" id="snap" checked> ドラッグを拍に吸着</label><label style="margin:8px 0 0"><input type="checkbox" id="split" checked> 同じ高さの音を区切る</label></div>
   <h2 style="margin-top:16px">ミキサー <span id="vstat" style="font-weight:400">声データ: なし</span></h2>
   <div id="mix"></div>
@@ -253,6 +257,42 @@ $('mic').onclick=async()=>{
   }
 };
 
+/* ---------- 隙間の判定: 休符にするか、前後の音符をつなぐか ---------- */
+function smoothEnv(){
+  const o=[];
+  for(let i=0;i<env.length;i++){let s=0,c=0;for(let j=Math.max(0,i-1);j<=Math.min(env.length-1,i+1);j++){s+=env[j][1];c++}o.push([env[i][0],s/c])}
+  return o;
+}
+function refine(infos,LAG){
+  if(!infos.length||!env.length)return;
+  const E=smoothEnv(),minRest=60/(+$('bpm').value||100)/(+$('minrest').value||4);
+  const pkOf=(a,b)=>{let p=0;for(const [t,v] of E){if(t>b)break;if(t>=a&&v>p)p=v}return p};
+  const setEnd=(n,e)=>{e=Math.max(n.s+0.05,e);n.d=e-n.s;n.od=n.d};
+  infos.forEach((A,i)=>{
+    const B=infos[i+1],pkA=pkOf(Math.max(A.t0,A.t1-0.3),A.t1),th=Math.max(0.25*pkA,thr*0.6);
+    const w0=A.t1-0.15,w1=B?B.t0:A.t1+0.5;
+    /* 音量が基準を下回っている最も長い区間を探す */
+    let best=null,run=null;
+    for(const [t,v] of E){
+      if(t<w0)continue;if(t>w1)break;
+      if(v<th){if(!run)run={s:t,e:t};else run.e=t;if(!best||run.e-run.s>best.e-best.s)best={s:run.s,e:run.e}}else run=null;
+    }
+    if(!B){if(best)setEnd(A.b,best.s-LAG);return}
+    /* 休符: 音量が低い状態が最短休符以上続いた時だけ。音符の終わりは音量が下がった時刻 */
+    if(best&&best.e-best.s+0.016>=minRest){setEnd(A.b,best.s-LAG);return}
+    /* それ以外は声が続いているとみなして前後の音符をつなぐ。境界は音量が最小の点 */
+    const g=B.t0-A.t1;let tb=(A.t1+B.t0)/2,mn=1e9;
+    for(const [t,v] of E){if(t<A.t1+0.2*g)continue;if(t>A.t1+0.8*g)break;if(v<mn){mn=v;tb=t}}
+    tb-=LAG;
+    const a=A.b,b=B.a,pkB=pkOf(B.t0,B.t0+0.3),dip=mn<0.6*Math.min(pkA,pkB);
+    if(a.m===b.m&&!($('split').checked&&dip)){
+      const e=b.s+b.d;a.pf=(a.pf*a.d+b.pf*b.d)/(a.d+b.d);a.d=e-a.s;a.od=a.d;b.del=1;if(b===B.b)B.b=a;
+    }else{
+      setEnd(a,tb);const e=b.s+b.d;b.s=Math.min(b.s,a.s+a.d);b.o=b.s;b.d=e-b.s;b.od=b.d;
+    }
+  });
+}
+
 /* ---------- 録音後: 音程の線から音符を作り直す ---------- */
 function buildNotes(){
   const LAG=0.02,pts=contour.filter(p=>p[1]>=21&&p[1]<=108);
@@ -260,9 +300,9 @@ function buildNotes(){
   const segs=[];let cs=[pts[0]];
   for(let i=1;i<pts.length;i++){if(pts[i][0]-pts[i-1][0]>0.1){segs.push(cs);cs=[]}cs.push(pts[i])}
   segs.push(cs);
-  const out=[];
+  const out=[],infos=[];
   segs.forEach(sg=>{
-    const T=sg.length;if(T<3)return;
+    const T=sg.length;if(T<3)return;const k0=out.length;
     const lo=Math.max(21,Math.floor(Math.min(...sg.map(p=>p[1])))-1),hi=Math.min(108,Math.ceil(Math.max(...sg.map(p=>p[1])))+1);
     const S=hi-lo+1,P=1.2,bp=[];let prev=new Float64Array(S);
     /* ビタビ: 全体を見て「音名を切り替えるコスト」と「線とのずれ」の合計が最小になる音名列を選ぶ */
@@ -310,8 +350,10 @@ function buildNotes(){
         out.push({m:r.m,s:s0,d:e0-s0,o:s0,od:e0-s0,pf:c?sum/c:r.m});
       }
     });
+    if(out.length>k0)infos.push({a:out[k0],b:out[out.length-1],t0:sg[0][0],t1:sg[T-1][0]});
   });
-  return out.sort((x,y)=>x.s-y.s);
+  refine(infos,LAG);
+  return out.filter(n=>!n.del).sort((x,y)=>x.s-y.s);
 }
 
 /* ---------- 録音・再生 ---------- */
@@ -338,7 +380,7 @@ $('play').onclick=()=>{
 $('clear').onclick=()=>{pushH();notes=[];sel=-1;contour=[];save();draw();ui();showEd()};
 function ui(){
   $('play').disabled=playing||!notes.length||recording;
-  $('clear').disabled=!notes.length||recording;$('quant').disabled=!notes.length||recording;$('undo').disabled=!hist.length||recording;$('redo').disabled=!redo.length||recording;
+  $('clear').disabled=!notes.length||recording;$('quant').disabled=!notes.length||recording;$('undo').disabled=!hist.length||recording;$('redo').disabled=!redo.length||recording;$('rebuild').disabled=!contour.length||recording;
 }
 
 /* ---------- 表示 ---------- */
@@ -451,6 +493,11 @@ $('quant').onclick=()=>{pushH();
   sel=-1;save();draw();showEd();ui();
 };
 $('bpm').oninput=$('grid').onchange=draw;
+$('rebuild').onclick=()=>{
+  if(!contour.length||recording)return;
+  const nn=buildNotes();if(!nn||!nn.length)return;
+  pushH();notes=nn;sel=-1;save();draw();showEd();ui();
+};
 function pushH(){if(!notes.length)return;hist.push(JSON.stringify(notes));if(hist.length>60)hist.shift();redo=[];ui()}
 function restore(s){notes=JSON.parse(s);sel=-1;save();draw();showEd();ui()}
 $('undo').onclick=()=>{if(!hist.length)return;redo.push(JSON.stringify(notes));restore(hist.pop())};
