@@ -65,6 +65,7 @@ input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:
   <label style="margin-top:8px">感度 <input type="range" id="sens" min="0" max="100" value="60"></label>
   <div class="row" style="margin-top:12px">
     <button class="p" id="mic">マイク開始</button>
+    <button id="cal">ノイズ再測定</button>
   </div>
   <label><input type="checkbox" id="live" checked> 声に合わせてピアノを鳴らす(イヤホン推奨)</label>
 </div>
@@ -125,14 +126,15 @@ function piano(midi,when,dur,vol){
 }
 
 /* ---------- ピッチ検出 (YIN) ---------- */
-function yin(b,sr){
-  const W=1024,minT=Math.floor(sr/1000),maxT=Math.min(Math.floor(sr/70),b.length-W-1);
+function yin(b0,sr){
+  const W=1536,mx=Math.floor(sr/70),L=W+mx+2,b=b0.length>L?b0.subarray(b0.length-L):b0;
+  const minT=Math.floor(sr/1000),maxT=Math.min(mx,b.length-W-1);
   const d=new Float32Array(maxT+1);
   for(let tau=1;tau<=maxT;tau++){let s=0;for(let i=0;i<W;i++){const x=b[i]-b[i+tau];s+=x*x}d[tau]=s}
   let run=0;d[0]=1;
   for(let tau=1;tau<=maxT;tau++){run+=d[tau];d[tau]=d[tau]*tau/(run||1)}
   for(let tau=minT;tau<maxT;tau++){
-    if(d[tau]<0.15){
+    if(d[tau]<0.2){
       while(tau+1<maxT&&d[tau+1]<d[tau])tau++;
       const a=d[tau-1],bb=d[tau],c=d[tau+1],den=a-2*bb+c;
       const sh=den?0.5*(a-c)/den:0;
@@ -140,6 +142,15 @@ function yin(b,sr){
     }
   }
   return -1;
+}
+
+/* ---------- 周囲ノイズの自動測定 ---------- */
+let calib=null,nh=[];
+function startCalib(){calib={v:[],end:performance.now()+1000};$('rec').disabled=true}
+function autoThr(nz){
+  const t=Math.max(0.003,Math.min(0.08,nz*3)),v=100*Math.log(t/0.1)/Math.log(0.02);
+  $('sens').value=Math.round(Math.max(0,Math.min(100,v)));setSens();
+  $('eng').textContent='歌ってみてください';$('rec').disabled=false;
 }
 
 /* ---------- ノート確定処理 ---------- */
@@ -159,8 +170,15 @@ function startNote(m){
 function loop(){
   if(!running)return;
   analyser.getFloatTimeDomainData(buf);
-  let rms=0;for(let i=0;i<buf.length;i++)rms+=buf[i]*buf[i];
-  rms=Math.sqrt(rms/buf.length);
+  let rms=0;for(let i=buf.length-2048;i<buf.length;i++)rms+=buf[i]*buf[i];
+  rms=Math.sqrt(rms/2048);
+  if(calib){
+    calib.v.push(rms);
+    $('badge').textContent='周囲の音を測定中…';$('eng').textContent='静かにしてください';
+    $('lvbar').style.width=(lvOf(rms)*100)+'%';
+    if(calib.end<=performance.now()){const a=calib.v.sort((x,y)=>x-y),nz=a[a.length>>1];calib=null;autoThr(nz)}
+    requestAnimationFrame(loop);return;
+  }
   const f=rms>(cur>=0?thr*0.6:thr)?yin(buf,ctx.sampleRate):-1;
   $('lvbar').style.width=(lvOf(rms)*100)+'%';
   $('lvbar').style.background=rms>thr?'var(--acc)':'var(--sub)';
@@ -169,7 +187,10 @@ function loop(){
   $('badge').textContent=f>0?'● 声を検出中':(rms>thr?'音を解析中…':'待機中');
   if(f>0){
     silentN=0;
-    const n=69+12*Math.log2(f/440),m=Math.round(n),cents=(n-m)*100;
+    nh.push(69+12*Math.log2(f/440));if(nh.length>3)nh.shift();
+    const n=[...nh].sort((a,b)=>a-b)[nh.length>>1];
+    let m=Math.round(n);if(cur>=0&&Math.abs(n-cur)<0.65)m=cur;
+    const cents=Math.max(-50,Math.min(50,(n-m)*100));
     $('name').textContent=JP[((m%12)+12)%12];
     $('eng').textContent=EN[((m%12)+12)%12]+(Math.floor(m/12)-1)+'  '+f.toFixed(1)+' Hz  ('+(cents>=0?'+':'')+cents.toFixed(0)+'¢)';
     $('needle').style.left=(50+cents)+'%';
@@ -177,14 +198,14 @@ function loop(){
     if(m===cur){pSum+=n;pN++}
     lastV=performance.now();
     if(m===cand)candN++;else{cand=m;candN=1}
-    if(candN>=4&&m!==cur){endNote(performance.now()-65);startNote(m)}
+    if(candN>=(cur>=0&&Math.abs(m-cur)%12===0?8:4)&&m!==cur){endNote(performance.now()-65);startNote(m)}
     else if(cur>=0&&m===cur&&$('split').checked){
       const now=performance.now();
       if(rms>pk){pk=rms;vl=rms;vlT=now}else if(rms<vl){vl=rms;vlT=now}
       if(vl<pk*0.5&&rms>vl*1.6&&now-curStart>150){endNote(vlT);startNote(m);curStart=vlT;pk=rms;vl=rms}
     }
   }else{
-    cand=-1;candN=0;silentN++;
+    cand=-1;candN=0;silentN++;if(silentN>2)nh=[];
     if(silentN>6){endNote();$('name').textContent='–';$('eng').textContent='…';$('needle').style.left='50%'}
   }
   if(recording){metro();draw();$('rec').textContent='■ 停止 '+((performance.now()-recT0)/1000).toFixed(1)+'秒'}
@@ -194,7 +215,7 @@ function loop(){
 /* ---------- マイク ---------- */
 $('mic').onclick=async()=>{
   if(running){
-    running=false;endNote();stopRec();
+    running=false;calib=null;endNote();stopRec();
     if(ctx.__stream)ctx.__stream.getTracks().forEach(t=>t.stop());
     $('mic').textContent='マイク開始';$('rec').disabled=true;
     $('name').textContent='–';$('eng').textContent='停止中';$('c1').classList.remove('hot');$('badge').textContent='待機中';$('lvbar').style.width='0';return;
@@ -202,13 +223,15 @@ $('mic').onclick=async()=>{
   try{
     if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();
     await ctx.resume();
-    const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    const stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     ctx.__stream=stream;
-    analyser=ctx.createAnalyser();analyser.fftSize=2048;
-    ctx.createMediaStreamSource(stream).connect(analyser);
-    buf=new Float32Array(analyser.fftSize);
+    analyser=ctx.createAnalyser();analyser.fftSize=4096;
+    const hp=ctx.createBiquadFilter();hp.type='highpass';hp.frequency.value=75;hp.Q.value=0.7;
+    const lp=ctx.createBiquadFilter();lp.type='lowpass';lp.frequency.value=2000;lp.Q.value=0.7;
+    ctx.createMediaStreamSource(stream).connect(hp);hp.connect(lp);lp.connect(analyser);
+    buf=new Float32Array(analyser.fftSize);nh=[];
     running=true;$('mic').textContent='マイク停止';$('rec').disabled=false;
-    $('eng').textContent='歌ってみてください';loop();
+    $('eng').textContent='静かにしてください';startCalib();loop();
   }catch(e){
     const n=e&&e.name||'Error';
     let msg='マイクを開始できませんでした ('+n+')';
@@ -293,7 +316,7 @@ function draw(){
   g.textBaseline='alphabetic';
 }
 window.addEventListener('resize',draw);
-$('sens').oninput=setSens;setSens();
+$('sens').oninput=setSens;setSens();$('cal').onclick=()=>{if(running&&!calib&&!recording)startCalib()};
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 function prev(){const n=notes[sel];if(!n)return;if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();ctx.resume();piano(n.m,ctx.currentTime,Math.min(n.d,1.5))}
 function edit(fn){const n=notes[sel];if(!n)return;pushH();fn(n);n.m=clamp(n.m,21,108);n.d=Math.max(0.05,+n.d.toFixed(3));n.s=Math.max(0,+n.s.toFixed(3));save();draw();showEd();prev()}
