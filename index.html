@@ -127,8 +127,11 @@ function piano(midi,when,dur,vol){
 
 /* ---------- ピッチ検出 (YIN) ---------- */
 function yin(b0,sr){
-  const W=1536,mx=Math.floor(sr/70),L=W+mx+2,b=b0.length>L?b0.subarray(b0.length-L):b0;
-  const minT=Math.floor(sr/1000),maxT=Math.min(mx,b.length-W-1);
+  /* 約16kHzに間引いて計算量を約1/9に(処理落ち・遅延対策) */
+  const dsf=Math.max(1,Math.round(sr/16000)),sr2=sr/dsf,W=Math.round(0.032*sr2),mx=Math.floor(sr2/65),L=(W+mx+2)*dsf;
+  const src=b0.length>L?b0.subarray(b0.length-L):b0,n2=Math.floor(src.length/dsf),b=new Float32Array(n2);
+  for(let i=0;i<n2;i++){let a=0;for(let k=0;k<dsf;k++)a+=src[i*dsf+k];b[i]=a/dsf}
+  const minT=Math.floor(sr2/1000),maxT=Math.min(mx,b.length-W-1);
   const d=new Float32Array(maxT+1);
   for(let tau=1;tau<=maxT;tau++){let s=0;for(let i=0;i<W;i++){const x=b[i]-b[i+tau];s+=x*x}d[tau]=s}
   let run=0;d[0]=1;
@@ -138,14 +141,14 @@ function yin(b0,sr){
       while(tau+1<maxT&&d[tau+1]<d[tau])tau++;
       const a=d[tau-1],bb=d[tau],c=d[tau+1],den=a-2*bb+c;
       const sh=den?0.5*(a-c)/den:0;
-      return sr/(tau+sh);
+      return sr2/(tau+sh);
     }
   }
   return -1;
 }
 
 /* ---------- 周囲ノイズの自動測定 ---------- */
-let calib=null,nh=[],candF=0;
+let calib=null,nh=[],candF=0,candT=0,lastDraw=0;
 function startCalib(){calib={v:[],end:performance.now()+1000};$('rec').disabled=true}
 function autoThr(nz){
   const t=Math.max(0.003,Math.min(0.08,nz*3)),v=100*Math.log(t/0.1)/Math.log(0.02);
@@ -167,15 +170,15 @@ function endNote(te){
   }
   cur=-1;
 }
-function startNote(m){
-  cur=m;curStart=performance.now()-65;pSum=0;pN=0;pk=0;vl=1;vlT=0;
+function startNote(m,t0){
+  cur=m;curStart=t0!=null?t0:performance.now()-65;pSum=0;pN=0;pk=0;vl=1;vlT=0;
   if($('live').checked)piano(m,ctx.currentTime,0.6);
 }
 function loop(){
   if(!running)return;
   analyser.getFloatTimeDomainData(buf);
-  let rms=0;for(let i=buf.length-2048;i<buf.length;i++)rms+=buf[i]*buf[i];
-  rms=Math.sqrt(rms/2048);
+  let rms=0;for(let i=buf.length-1024;i<buf.length;i++)rms+=buf[i]*buf[i];
+  rms=Math.sqrt(rms/1024);
   if(calib){
     calib.v.push(rms);
     $('badge').textContent='周囲の音を測定中…';$('eng').textContent='静かにしてください';
@@ -201,9 +204,11 @@ function loop(){
     if(recording)contour.push([(performance.now()-recT0)/1000,n]);
     if(m===cur){pSum+=n;pN++}
     lastV=performance.now();
-    if(candN>0&&Math.abs(n-candF)<0.6){candN++;candF+=(n-candF)/candN}else{candF=n;candN=1}
+    const nowT=performance.now();
+    if(candN>0&&Math.abs(n-candF)<0.6){candN++;candF+=(n-candF)/candN}else{candF=n;candN=1;candT=nowT}
     const cm=(cur>=0&&Math.abs(candF-cur)<0.65)?cur:Math.round(candF);
-    if(candN>=(cur>=0&&Math.abs(cm-cur)%12===0?8:4)&&cm!==cur){endNote(performance.now()-65);startNote(cm)}
+    const oj=cur>=0&&Math.abs(cm-cur)%12===0;
+    if(candN>=(oj?3:2)&&nowT-candT>=(oj?55:30)&&cm!==cur){endNote(candT-25);startNote(cm,candT-25)}
     else if(cur>=0&&m===cur&&$('split').checked){
       const now=performance.now();
       if(rms>pk){pk=rms;vl=rms;vlT=now}else if(rms<vl){vl=rms;vlT=now}
@@ -213,7 +218,7 @@ function loop(){
     silentN++;
     if(performance.now()-lastV>100){cand=-1;candN=0;nh=[];endNote();$('name').textContent='–';$('eng').textContent='…';$('needle').style.left='50%'}
   }
-  if(recording){metro();draw();$('rec').textContent='■ 停止 '+((performance.now()-recT0)/1000).toFixed(1)+'秒'}
+  if(recording){metro();const tn=performance.now();if(tn-lastDraw>66){lastDraw=tn;draw();$('rec').textContent='■ 停止 '+((tn-recT0)/1000).toFixed(1)+'秒'}}
   requestAnimationFrame(loop);
 }
 
@@ -231,7 +236,7 @@ $('mic').onclick=async()=>{
     const stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     ctx.__stream=stream;
     analyser=ctx.createAnalyser();analyser.fftSize=4096;
-    const hp=ctx.createBiquadFilter();hp.type='highpass';hp.frequency.value=75;hp.Q.value=0.7;
+    const hp=ctx.createBiquadFilter();hp.type='highpass';hp.frequency.value=60;hp.Q.value=0.7;
     const lp=ctx.createBiquadFilter();lp.type='lowpass';lp.frequency.value=2000;lp.Q.value=0.7;
     ctx.createMediaStreamSource(stream).connect(hp);hp.connect(lp);lp.connect(analyser);
     buf=new Float32Array(analyser.fftSize);nh=[];
@@ -279,8 +284,8 @@ function draw(){
   const so=[...notes].sort((a,b)=>a.s-b.s);
   $('seq').textContent=so.map((n,i)=>(i&&n.s-(so[i-1].s+so[i-1].d)>=0.25?'〔休〕  ':'')+JP[((n.m%12)+12)%12]+'('+EN[((n.m%12)+12)%12]+(Math.floor(n.m/12)-1)+')').join('  ');
   const c=$('roll'),dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
-  c.width=w*dpr;c.height=h*dpr;
-  const g=c.getContext('2d');g.scale(dpr,dpr);
+  const cw=Math.round(w*dpr),ch=Math.round(h*dpr);if(c.width!==cw)c.width=cw;if(c.height!==ch)c.height=ch;
+  const g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);
   const cs=getComputedStyle(document.documentElement);
   const line=cs.getPropertyValue('--line').trim(),col=cs.getPropertyValue('--note').trim(),sub=cs.getPropertyValue('--sub').trim();
   g.clearRect(0,0,w,h);
