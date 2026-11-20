@@ -45,6 +45,8 @@ input[type=range]{flex:1;min-width:0;accent-color:var(--acc)}
 .eg{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 .eg button{padding:9px 2px;font-size:13px}
 canvas{touch-action:none}
+.card.full{position:fixed;inset:0;z-index:50;margin:0;border-radius:0;border:0;overflow:auto;padding:calc(env(safe-area-inset-top,0px) + 12px) 14px calc(env(safe-area-inset-bottom,0px) + 14px)}
+.full canvas{height:52vh;height:52dvh}
 input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text)}
 </style>
 </head>
@@ -67,9 +69,11 @@ input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:
   <label><input type="checkbox" id="live" checked> 声に合わせてピアノを鳴らす(イヤホン推奨)</label>
 </div>
 
-<div class="card">
+<div class="card" id="c2">
   <h2>メロディ録音</h2>
-  <canvas id="roll"></canvas>
+  <div class="row" style="margin-bottom:8px"><button id="undo" disabled>↶ 元に戻す</button><button id="redo" disabled>↷ やり直し</button><button id="fs">⛶ 全画面</button></div>
+  <label style="margin:0 0 8px">拡大 <input type="range" id="zoom" min="1" max="6" step="0.5" value="1"></label>
+  <div id="rw" style="overflow-x:auto"><canvas id="roll"></canvas></div>
   <div class="seq" id="seq"></div>
   <div class="ed" id="ed"><div class="info" id="edinfo"></div><div class="eg" id="eg"></div></div>
   <div class="row" style="margin-top:10px">
@@ -95,7 +99,7 @@ const EN=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const $=id=>document.getElementById(id);
 let ctx,analyser,buf,running=false;
 let cand=-1,candN=0,cur=-1,curStart=0,silentN=0;
-let recording=false,recT0=0,notes=[],playing=false,sel=-1,thr=0.01,lay={},frozen=null,voiceBuf=null,mr=null,vchunks=[],contour=[],pSum=0,pN=0,lastV=0,lastBeat=-1;
+let recording=false,recT0=0,notes=[],playing=false,sel=-1,thr=0.01,lay={},frozen=null,voiceBuf=null,mr=null,vchunks=[],contour=[],pSum=0,pN=0,lastV=0,lastBeat=-1,hist=[],redo=[];
 const thrOf=v=>0.1*Math.pow(0.02,v/100);
 const lvOf=r=>Math.max(0,Math.min(1,(20*Math.log10(r+1e-9)+60)/60));
 function setSens(){thr=thrOf(+$('sens').value);$('thrmark').style.left=(lvOf(thr)*100)+'%'}
@@ -220,7 +224,7 @@ function stopRec(){
 }
 $('rec').onclick=()=>{
   if(recording){stopRec();return}
-  notes=[];sel=-1;recVoice();recording=true;recT0=performance.now();showEd();lastBeat=-1;
+  pushH();notes=[];sel=-1;recVoice();recording=true;recT0=performance.now();showEd();lastBeat=-1;
   $('rec').textContent='■ 停止';$('rec').classList.add('on');draw();ui();
 };
 $('play').onclick=()=>{
@@ -231,10 +235,10 @@ $('play').onclick=()=>{
   end=playAll(t0);
   setTimeout(()=>{playing=false;ui()},(end+1)*1000);
 };
-$('clear').onclick=()=>{notes=[];sel=-1;voiceBuf=null;contour=[];$('vstat').textContent='声データ: なし';save();draw();ui();showEd()};
+$('clear').onclick=()=>{pushH();notes=[];sel=-1;contour=[];save();draw();ui();showEd()};
 function ui(){
   $('play').disabled=playing||!notes.length||recording;
-  $('clear').disabled=!notes.length||recording;$('quant').disabled=!notes.length||recording;
+  $('clear').disabled=!notes.length||recording;$('quant').disabled=!notes.length||recording;$('undo').disabled=!hist.length||recording;$('redo').disabled=!redo.length||recording;
 }
 
 /* ---------- 表示 ---------- */
@@ -284,7 +288,7 @@ window.addEventListener('resize',draw);
 $('sens').oninput=setSens;setSens();
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 function prev(){const n=notes[sel];if(!n)return;if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();ctx.resume();piano(n.m,ctx.currentTime,Math.min(n.d,1.5))}
-function edit(fn){const n=notes[sel];if(!n)return;fn(n);n.m=clamp(n.m,21,108);n.d=Math.max(0.05,+n.d.toFixed(3));n.s=Math.max(0,+n.s.toFixed(3));save();draw();showEd();prev()}
+function edit(fn){const n=notes[sel];if(!n)return;pushH();fn(n);n.m=clamp(n.m,21,108);n.d=Math.max(0.05,+n.d.toFixed(3));n.s=Math.max(0,+n.s.toFixed(3));save();draw();showEd();prev()}
 function showEd(){
   const n=notes[sel];$('ed').classList.toggle('show',!!n);
   if(!n)return;
@@ -293,7 +297,7 @@ function showEd(){
 }
 [['半音 ▼',n=>n.m--],['半音 ▲',n=>n.m++],['1oct ▼',n=>n.m-=12],['1oct ▲',n=>n.m+=12],['短く',n=>n.d-=0.1],['長く',n=>n.d+=0.1],['◀ 早く',n=>n.s-=0.1],['遅く ▶',n=>n.s+=0.1]].forEach(([t,f])=>{const b=document.createElement('button');b.textContent=t;b.onclick=()=>edit(f);$('eg').appendChild(b)});
 const del=document.createElement('button');del.textContent='削除';del.style.color='#d33';
-del.onclick=()=>{if(sel<0)return;notes.splice(sel,1);sel=-1;save();draw();showEd();ui()};$('eg').appendChild(del);
+del.onclick=()=>{if(sel<0)return;pushH();notes.splice(sel,1);sel=-1;save();draw();showEd();ui()};$('eg').appendChild(del);
 const pv=document.createElement('button');pv.textContent='▶ 試聴';pv.onclick=prev;$('eg').appendChild(pv);
 $('roll').onclick=e=>{
   if(recording||!lay.rh)return;
@@ -318,24 +322,24 @@ R.onpointerdown=e=>{
   sel=best;
   if(sel>=0){
     const n=notes[sel],nx=lay.ML+n.s/lay.total*lay.pw,nw=Math.max(4,n.d/lay.total*lay.pw);
-    drag={x:e.clientX,y:e.clientY,m:n.m,s:n.s,d:n.d,mode:(x>nx+nw-12&&nw>24)?'rs':'mv'};
+    drag={sn0:JSON.stringify(notes),x:e.clientX,y:e.clientY,m:n.m,s:n.s,d:n.d,mode:(x>nx+nw-12&&nw>24)?'rs':'mv'};
     frozen={lo:lay.lo,hi:lay.hi,total:lay.total};
     R.setPointerCapture(e.pointerId);prev();
-  }
+  }else{drag={pan:1,x:e.clientX,sl:$('rw').scrollLeft};R.setPointerCapture(e.pointerId)}
   draw();showEd();
 };
 R.onpointermove=e=>{
-  if(!drag)return;const n=notes[sel];if(!n)return;
+  if(!drag)return;if(drag.pan){$('rw').scrollLeft=drag.sl-(e.clientX-drag.x);return}const n=notes[sel];if(!n)return;
   const dx=e.clientX-drag.x,dm=Math.round(-(e.clientY-drag.y)/lay.rh),g=60/(+$('bpm').value||100)/(+$('grid').value);
   const sn=v=>$('snap').checked?Math.round(v/g)*g:v,dt=dx/lay.pw*lay.total;
   if(drag.mode==='rs')n.d=Math.max(0.05,sn(drag.d+dt));
   else{n.s=Math.max(0,sn(drag.s+dt));const nm=clamp(drag.m+dm,lay.lo,lay.hi);if(nm!==n.m){n.m=nm;prev()}}
   draw();showEd();
 };
-R.onpointerup=R.onpointercancel=()=>{if(drag){drag=null;frozen=null;save();draw();showEd()}};
+R.onpointerup=R.onpointercancel=()=>{if(drag){if(drag.sn0&&JSON.stringify(notes)!==drag.sn0){hist.push(drag.sn0);redo=[]}drag=null;frozen=null;save();draw();showEd();ui()}};
 
 /* --- 拍に揃える --- */
-$('quant').onclick=()=>{
+$('quant').onclick=()=>{pushH();
   const g=60/(+$('bpm').value||100)/(+$('grid').value);
   notes.forEach(n=>{n.s=Math.round(n.s/g)*g;n.d=Math.max(g,Math.round(n.d/g)*g)});
   notes.sort((a,b)=>a.s-b.s);
@@ -344,6 +348,12 @@ $('quant').onclick=()=>{
   sel=-1;save();draw();showEd();ui();
 };
 $('bpm').oninput=$('grid').onchange=draw;
+function pushH(){if(!notes.length)return;hist.push(JSON.stringify(notes));if(hist.length>60)hist.shift();redo=[];ui()}
+function restore(s){notes=JSON.parse(s);sel=-1;save();draw();showEd();ui()}
+$('undo').onclick=()=>{if(!hist.length)return;redo.push(JSON.stringify(notes));restore(hist.pop())};
+$('redo').onclick=()=>{if(!redo.length)return;hist.push(JSON.stringify(notes));restore(redo.pop())};
+$('zoom').oninput=()=>{R.style.width=(+$('zoom').value*100)+'%';draw()};
+$('fs').onclick=()=>{const on=$('c2').classList.toggle('full');$('fs').textContent=on?'✕ 閉じる':'⛶ 全画面';document.body.style.overflow=on?'hidden':'';draw()};
 function metro(){
   if(!$('metro').checked)return;
   const bs=60/(+$('bpm').value||100),b=Math.floor((performance.now()-recT0)/1000/bs);
@@ -369,11 +379,18 @@ const rd=(x,p)=>{const i=Math.floor(p);if(i<0||i+1>=x.length)return 0;const f=p-
 /* 声全体を連続して再構成: 音符部分は時間を保ったまま音程だけ補正、音符の間は元の声をつなぐ */
 function renderVoice(){
   const x=voiceBuf.getChannelData(0),sr=ctx.sampleRate,W=Math.floor(0.06*sr),F=Math.floor(0.008*sr);
-  const segs=[];let ps=0,pd=0;
-  notes.filter(n=>n.pf!=null).sort((a,b)=>a.s-b.s).forEach(n=>{
-    if(n.o>ps&&n.s>pd)segs.push({ss:ps,sd:n.o-ps,ds:pd,dd:n.s-pd,r:1});
-    segs.push({ss:n.o,sd:n.od,ds:n.s,dd:n.d,r:Math.pow(2,(n.m-n.pf)/12)});
-    ps=n.o+n.od;pd=n.s+n.d;
+  const segs=[],E=0.12,ns=notes.filter(n=>n.pf!=null).sort((a,b)=>a.s-b.s);let ps=0,pd=0;
+  const ext=(i,side)=>{
+    const n=ns[i],m=side<0?ns[i-1]:ns[i+1],k=m?2:1;
+    const gs=side<0?n.o-(m?m.o+m.od:0):(m?m.o:voiceBuf.duration)-(n.o+n.od);
+    const gd=side<0?n.s-(m?m.s+m.d:0):(m?m.s:1e9)-(n.s+n.d);
+    return Math.max(0,Math.min(E,gs/k,gd/k));
+  };
+  ns.forEach((n,i)=>{
+    const e1=ext(i,-1),e2=ext(i,1);
+    if(n.o-e1>ps&&n.s-e1>pd)segs.push({ss:ps,sd:n.o-e1-ps,ds:pd,dd:n.s-e1-pd,r:1});
+    segs.push({ss:n.o-e1,sd:n.od+e1+e2,ds:n.s-e1,dd:n.d+e1+e2,r:Math.pow(2,(n.m-n.pf)/12)});
+    ps=n.o+n.od+e2;pd=n.s+n.d+e2;
   });
   if(voiceBuf.duration>ps)segs.push({ss:ps,sd:voiceBuf.duration-ps,ds:pd,dd:voiceBuf.duration-ps,r:1});
   if(!segs.length)return voiceBuf;
