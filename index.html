@@ -90,7 +90,7 @@ input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:
   <div class="row" style="margin-top:4px"><label style="margin:8px 0 0"><input type="checkbox" id="metro"> 録音中メトロノーム</label><label style="margin:8px 0 0"><input type="checkbox" id="snap" checked> ドラッグを拍に吸着</label><label style="margin:8px 0 0"><input type="checkbox" id="split" checked> 同じ高さの音を区切る</label></div>
   <h2 style="margin-top:16px">ミキサー <span id="vstat" style="font-weight:400">声データ: なし</span></h2>
   <div id="mix"></div>
-  <div class="hint">録音中に歌った音が自動で音符になります。録音後、音符をドラッグすると上下で音程、左右で位置を動かせます(右端をドラッグで長さ)。細い線は、歌った声そのままの音程です。マイク開始後に使えます。スピーカーで鳴らすとピアノの音を拾うので、イヤホンがおすすめです。</div>
+  <div class="hint">録音中は仮の音符が表示され、停止すると音程の線から音符を作り直します。録音後、音符をドラッグすると上下で音程、左右で位置を動かせます(右端をドラッグで長さ)。細い線は、歌った声そのままの音程です。マイク開始後に使えます。スピーカーで鳴らすとピアノの音を拾うので、イヤホンがおすすめです。</div>
 </div>
 </main>
 
@@ -148,7 +148,7 @@ function yin(b0,sr){
 }
 
 /* ---------- 周囲ノイズの自動測定 ---------- */
-let calib=null,nh=[],candF=0,candT=0,lastDraw=0;
+let calib=null,nh=[],candF=0,candT=0,lastDraw=0,env=[];
 function startCalib(){calib={v:[],end:performance.now()+1000};$('rec').disabled=true}
 function autoThr(nz){
   const t=Math.max(0.003,Math.min(0.08,nz*3)),v=100*Math.log(t/0.1)/Math.log(0.02);
@@ -218,7 +218,7 @@ function loop(){
     silentN++;
     if(performance.now()-lastV>100){cand=-1;candN=0;nh=[];endNote();$('name').textContent='–';$('eng').textContent='…';$('needle').style.left='50%'}
   }
-  if(recording){metro();const tn=performance.now();if(tn-lastDraw>66){lastDraw=tn;draw();$('rec').textContent='■ 停止 '+((tn-recT0)/1000).toFixed(1)+'秒'}}
+  if(recording){env.push([(performance.now()-recT0)/1000,rms]);metro();const tn=performance.now();if(tn-lastDraw>66){lastDraw=tn;draw();$('rec').textContent='■ 停止 '+((tn-recT0)/1000).toFixed(1)+'秒'}}
   requestAnimationFrame(loop);
 }
 
@@ -253,11 +253,73 @@ $('mic').onclick=async()=>{
   }
 };
 
+/* ---------- 録音後: 音程の線から音符を作り直す ---------- */
+function buildNotes(){
+  const LAG=0.02,pts=contour.filter(p=>p[1]>=21&&p[1]<=108);
+  if(pts.length<3)return null;
+  const segs=[];let cs=[pts[0]];
+  for(let i=1;i<pts.length;i++){if(pts[i][0]-pts[i-1][0]>0.1){segs.push(cs);cs=[]}cs.push(pts[i])}
+  segs.push(cs);
+  const out=[];
+  segs.forEach(sg=>{
+    const T=sg.length;if(T<3)return;
+    const lo=Math.max(21,Math.floor(Math.min(...sg.map(p=>p[1])))-1),hi=Math.min(108,Math.ceil(Math.max(...sg.map(p=>p[1])))+1);
+    const S=hi-lo+1,P=1.2,bp=[];let prev=new Float64Array(S);
+    /* ビタビ: 全体を見て「音名を切り替えるコスト」と「線とのずれ」の合計が最小になる音名列を選ぶ */
+    for(let t=0;t<T;t++){
+      const n=sg[t][1],dt=t?sg[t][0]-sg[t-1][0]:(sg[1][0]-sg[0][0]),w=Math.min(3,Math.max(0.3,dt/0.0167));
+      const cu=new Float64Array(S),bt=new Int16Array(S);let mi=0;
+      if(t)for(let s=1;s<S;s++)if(prev[s]<prev[mi])mi=s;
+      for(let s=0;s<S;s++){
+        if(t){const sw=prev[mi]+P;if(prev[s]<=sw){cu[s]=prev[s];bt[s]=s}else{cu[s]=sw;bt[s]=mi}}
+        const dd=n-(lo+s);cu[s]+=w*Math.min(2.25,dd*dd);
+      }
+      bp.push(bt);prev=cu;
+    }
+    let s=0;for(let k=1;k<S;k++)if(prev[k]<prev[s])s=k;
+    const st=new Array(T);st[T-1]=s;for(let t=T-1;t>0;t--){s=bp[t][s];st[t-1]=s}
+    let runs=[];
+    for(let i=0;i<T;i++){const m=lo+st[i],r=runs[runs.length-1];if(r&&r.m===m)r.i1=i;else runs.push({m,i0:i,i1:i})}
+    const t0f=r=>r.i0?(sg[r.i0-1][0]+sg[r.i0][0])/2-LAG:sg[0][0]-LAG,
+          t1f=r=>r.i1<T-1?(sg[r.i1][0]+sg[r.i1+1][0])/2-LAG:sg[T-1][0]-LAG+0.02,
+          du=r=>t1f(r)-t0f(r);
+    /* 0.07秒未満の短い音は長いほうの隣に吸収 */
+    while(runs.length>1){
+      let k=0;for(let j=1;j<runs.length;j++)if(du(runs[j])<du(runs[k]))k=j;
+      if(du(runs[k])>=0.07)break;
+      const a=runs[k-1],b=runs[k+1],tg=!a?b:!b?a:(du(a)>=du(b)?a:b);
+      tg.i0=Math.min(tg.i0,runs[k].i0);tg.i1=Math.max(tg.i1,runs[k].i1);runs.splice(k,1);
+    }
+    for(let k=runs.length-1;k>0;k--)if(runs[k].m===runs[k-1].m){runs[k-1].i1=runs[k].i1;runs.splice(k,1)}
+    runs.forEach(r=>{
+      const a=t0f(r),b=t1f(r);if(b-a<0.05)return;
+      let cuts=[];
+      if($('split').checked){
+        let st0=a,pk=0,vl=1,vlT=0;
+        for(const [te,rv] of env){
+          const t=te-LAG;if(t<a)continue;if(t>b)break;
+          if(rv>pk){pk=rv;vl=rv;vlT=t}else if(rv<vl){vl=rv;vlT=t}
+          if(vl<pk*0.35&&rv>vl*2&&t-st0>0.18){cuts.push(vlT);st0=vlT;pk=rv;vl=rv;vlT=t}
+        }
+        cuts=cuts.filter(c=>b-c>=0.06);
+      }
+      const ed=[a,...cuts,b];
+      for(let j=0;j<ed.length-1;j++){
+        const s0=Math.max(0,ed[j]),e0=ed[j+1];if(e0-s0<0.05)continue;
+        let sum=0,c=0;for(let i=r.i0;i<=r.i1;i++){const t=sg[i][0]-LAG;if(t>=ed[j]&&t<e0){sum+=sg[i][1];c++}}
+        out.push({m:r.m,s:s0,d:e0-s0,o:s0,od:e0-s0,pf:c?sum/c:r.m});
+      }
+    });
+  });
+  return out.sort((x,y)=>x.s-y.s);
+}
+
 /* ---------- 録音・再生 ---------- */
 function stopRec(){
   if(!recording)return;
   endNote();recording=false;if(mr&&mr.state!=='inactive')mr.stop();
   $('rec').textContent='● 録音';$('rec').classList.remove('on');
+  const nn=buildNotes();if(nn&&nn.length){notes=nn;sel=-1;draw();showEd()}
   save();ui();
 }
 $('rec').onclick=()=>{
@@ -404,7 +466,7 @@ function metro(){
 
 /* --- 声の録音とミキサー --- */
 function recVoice(){
-  voiceBuf=null;vchunks=[];contour=[];$('vstat').textContent='声データ: 録音中';
+  voiceBuf=null;vchunks=[];contour=[];env=[];$('vstat').textContent='声データ: 録音中';
   try{
     mr=new MediaRecorder(ctx.__stream);
     mr.ondataavailable=e=>{if(e.data.size)vchunks.push(e.data)};
