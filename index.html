@@ -145,7 +145,7 @@ function yin(b0,sr){
 }
 
 /* ---------- 周囲ノイズの自動測定 ---------- */
-let calib=null,nh=[];
+let calib=null,nh=[],candF=0;
 function startCalib(){calib={v:[],end:performance.now()+1000};$('rec').disabled=true}
 function autoThr(nz){
   const t=Math.max(0.003,Math.min(0.08,nz*3)),v=100*Math.log(t/0.1)/Math.log(0.02);
@@ -157,8 +157,12 @@ function autoThr(nz){
 function endNote(te){
   if(cur<0)return;
   if(recording&&curStart>=recT0-70){
-    const dur=(Math.max(te||lastV,curStart+80)-curStart)/1000,s0=Math.max(0,(curStart-recT0)/1000);
-    if(dur>0.08)notes.push({m:cur,s:s0,d:dur,o:s0,od:dur,pf:pN?pSum/pN:cur});
+    const dur=((te||lastV)-curStart)/1000,s0=Math.max(0,(curStart-recT0)/1000);
+    const pv=notes[notes.length-1],gap=pv?s0-(pv.s+pv.d):9;
+    if(dur>=0.05){
+      if(pv&&dur<0.1&&gap<0.12&&(pv.m===cur||dur<0.07)){const add=Math.max(0,s0+dur-(pv.s+pv.d));pv.d+=add;pv.od+=add}
+      else notes.push({m:cur,s:s0,d:dur,o:s0,od:dur,pf:pN?pSum/pN:cur});
+    }
     draw();
   }
   cur=-1;
@@ -197,16 +201,17 @@ function loop(){
     if(recording)contour.push([(performance.now()-recT0)/1000,n]);
     if(m===cur){pSum+=n;pN++}
     lastV=performance.now();
-    if(m===cand)candN++;else{cand=m;candN=1}
-    if(candN>=(cur>=0&&Math.abs(m-cur)%12===0?8:4)&&m!==cur){endNote(performance.now()-65);startNote(m)}
+    if(candN>0&&Math.abs(n-candF)<0.6){candN++;candF+=(n-candF)/candN}else{candF=n;candN=1}
+    const cm=(cur>=0&&Math.abs(candF-cur)<0.65)?cur:Math.round(candF);
+    if(candN>=(cur>=0&&Math.abs(cm-cur)%12===0?8:4)&&cm!==cur){endNote(performance.now()-65);startNote(cm)}
     else if(cur>=0&&m===cur&&$('split').checked){
       const now=performance.now();
       if(rms>pk){pk=rms;vl=rms;vlT=now}else if(rms<vl){vl=rms;vlT=now}
-      if(vl<pk*0.5&&rms>vl*1.6&&now-curStart>150){endNote(vlT);startNote(m);curStart=vlT;pk=rms;vl=rms}
+      if(vl<pk*0.35&&rms>vl*2&&now-curStart>180){endNote(vlT);startNote(m);curStart=vlT;pk=rms;vl=rms}
     }
   }else{
-    cand=-1;candN=0;silentN++;if(silentN>2)nh=[];
-    if(silentN>6){endNote();$('name').textContent='–';$('eng').textContent='…';$('needle').style.left='50%'}
+    silentN++;
+    if(performance.now()-lastV>100){cand=-1;candN=0;nh=[];endNote();$('name').textContent='–';$('eng').textContent='…';$('needle').style.left='50%'}
   }
   if(recording){metro();draw();$('rec').textContent='■ 停止 '+((performance.now()-recT0)/1000).toFixed(1)+'秒'}
   requestAnimationFrame(loop);
