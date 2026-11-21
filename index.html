@@ -65,11 +65,14 @@ input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:
 #ckb *{box-sizing:border-box}
 #ckb b{position:absolute;top:0;bottom:0;border:1px solid var(--line);background:#fff;color:#555;font-size:10px;font-weight:400;padding-top:62px;text-align:center;border-radius:0 0 6px 6px}
 #ckb i{position:absolute;top:0;height:55%;background:#222;border-radius:0 0 4px 4px;z-index:2}
+.hd{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.hd h1{margin:0 0 4px}
+.ver{font-size:12px;color:var(--sub);border:1px solid var(--line);border-radius:99px;padding:3px 10px;white-space:nowrap;background:var(--card)}
 </style>
 </head>
 <body>
 <main>
-<h1>🎤 声でメロディメモ</h1>
+<div class="hd"><h1>🎤 声でメロディメモ</h1><span class="ver"></span></div>
 <p class="sub">声を音名に変換 → ピアノで鳴らす → 録音して残す</p>
 
 <div class="card" id="c1">
@@ -116,7 +119,7 @@ input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:
 </div>
 </main>
 <div id="comp">
- <div class="cb"><button id="cback">← 録音に戻る</button><b>🎼 作曲モード</b><button id="creimp">取り込み直し</button></div>
+ <div class="cb"><button id="cback">← 録音に戻る</button><b>🎼 作曲モード</b><span class="ver" style="margin-left:auto"></span><button id="creimp">取り込み直し</button></div>
  <div class="cb"><label>BPM <input type="number" id="cbpm" min="40" max="240"></label><label>キー <select id="ckey"></select></label><label>拍 <select id="cgrid"><option value="1">1/4</option><option value="0.5">1/8</option><option value="0.25" selected>1/16</option></select></label><button id="cadd">＋小節</button><label><input type="checkbox" id="csnap" checked> 拍に吸着</label><label>拡大 <input type="range" id="czoom" min="20" max="120" value="44" style="width:90px"></label></div>
  <div class="cb"><button id="cq">拍に揃える</button><button id="csn">キーに寄せる</button><select id="cmode"><option value="s">コード:シンプル</option><option value="p" selected>ポップス</option><option value="7">7thあり</option></select><button id="csug">コード提案</button><button id="cun">↶</button><button id="cre">↷</button><button id="cdel">削除</button></div>
  <div id="cscroll"><div id="cinner"><canvas id="croll"></canvas><canvas id="cchord"></canvas><i id="cph"></i></div></div>
@@ -128,9 +131,13 @@ input[type=number],select{font:inherit;font-size:14px;padding:9px;border-radius:
 </div>
 
 <script>
+/* バージョン: 改良するたびにこの数字を1つ上げる */
+const APP_VER=1;
 const JP=['ド','ド♯','レ','レ♯','ミ','ファ','ファ♯','ソ','ソ♯','ラ','ラ♯','シ'];
 const EN=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const $=id=>document.getElementById(id);
+document.querySelectorAll('.ver').forEach(e=>e.textContent='デモ版 ver'+APP_VER);
+document.title='声でメロディメモ(デモ版 ver'+APP_VER+')';
 let ctx,analyser,buf,running=false;
 let cand=-1,candN=0,cur=-1,curStart=0,silentN=0;
 let recording=false,recT0=0,notes=[],playing=false,sel=-1,thr=0.01,lay={},frozen=null,voiceBuf=null,mr=null,vchunks=[],contour=[],pSum=0,pN=0,lastV=0,lastBeat=-1,hist=[],redo=[],pk=0,vl=0,vlT=0;
@@ -257,13 +264,14 @@ function loop(){
 }
 
 /* ---------- マイク ---------- */
+function micOff(msg){
+  running=false;calib=null;endNote();stopRec();
+  if(ctx&&ctx.__stream){ctx.__stream.getTracks().forEach(t=>t.stop());ctx.__stream=null}
+  $('mic').textContent='マイク開始';$('rec').disabled=true;
+  $('name').textContent='–';$('eng').textContent=msg||'停止中';$('c1').classList.remove('hot');$('badge').textContent='待機中';$('lvbar').style.width='0';
+}
 $('mic').onclick=async()=>{
-  if(running){
-    running=false;calib=null;endNote();stopRec();
-    if(ctx.__stream)ctx.__stream.getTracks().forEach(t=>t.stop());
-    $('mic').textContent='マイク開始';$('rec').disabled=true;
-    $('name').textContent='–';$('eng').textContent='停止中';$('c1').classList.remove('hot');$('badge').textContent='待機中';$('lvbar').style.width='0';return;
-  }
+  if(running){micOff();return}
   try{
     if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();
     await ctx.resume();
@@ -395,7 +403,7 @@ function stopRec(){
   save();ui();
 }
 $('rec').onclick=()=>{
-  if(recording){stopRec();return}
+  if(recording){stopRec();micOff('録音を終えたのでマイクを止めました(電池節約)。続けて録音するときは「マイク開始」');return}
   pushH();notes=[];sel=-1;recVoice();recording=true;recT0=performance.now();showEd();lastBeat=-1;
   $('rec').textContent='■ 停止';$('rec').classList.add('on');draw();ui();
 };
